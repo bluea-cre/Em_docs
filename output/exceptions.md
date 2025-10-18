@@ -943,7 +943,10 @@ typedef struct {
 } TCB_t;
 
 #define MAX_TASKS 8
-#define TCB_SIZE_BYTES 12  // 3 uint32_t fields = 12 bytes
+// Note: TCB size must match assembly code in PendSV_Handler
+// Current size: 3 × 4 bytes = 12 bytes
+// If TCB structure changes, update the assembly MUL instructions!
+#define TCB_SIZE_BYTES 12
 TCB_t tasks[MAX_TASKS];
 uint8_t current_task = 0;
 uint8_t next_task = 0;
@@ -978,7 +981,7 @@ void PendSV_Handler(void) {
         "LDR     R1, =current_task      \n"  // R1 = &current_task
         "LDR     R1, [R1]               \n"  // R1 = current_task (index)
         "LDR     R2, =tasks             \n"  // R2 = &tasks[0]
-        "MOV     R3, #12                \n"  // R3 = sizeof(TCB_t) = 12 bytes
+        "MOV     R3, #12                \n"  // R3 = sizeof(TCB_t) = 12 bytes (must match C struct!)
         "MUL     R3, R1, R3             \n"  // R3 = current_task * 12
         "ADD     R2, R2, R3             \n"  // R2 = &tasks[current_task]
         "STR     R0, [R2]               \n"  // tasks[current_task].stack_ptr = PSP
@@ -993,7 +996,7 @@ void PendSV_Handler(void) {
         
         // Load PSP from next task's TCB
         "LDR     R2, =tasks             \n"
-        "MOV     R3, #12                \n"  // R3 = sizeof(TCB_t) = 12 bytes
+        "MOV     R3, #12                \n"  // R3 = sizeof(TCB_t) = 12 bytes (must match C struct!)
         "MUL     R3, R0, R3             \n"  // R3 = next_task * 12
         "ADD     R2, R2, R3             \n"  // R2 = &tasks[next_task]
         "LDR     R0, [R2]               \n"  // R0 = tasks[next_task].stack_ptr
@@ -3032,13 +3035,13 @@ bool circular_buffer_put(CircularBuffer_t *cb, uint8_t data) {
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
     
-    if (cb->count >= sizeof(cb->buffer)) {
+    if (cb->count >= UART_TX_BUFFER_SIZE) {
         __set_PRIMASK(primask);  // Restore interrupts
         return false;  // Buffer full
     }
     
     cb->buffer[cb->head] = data;
-    cb->head = (cb->head + 1) % sizeof(cb->buffer);
+    cb->head = (cb->head + 1) % UART_TX_BUFFER_SIZE;
     cb->count++;
     
     __set_PRIMASK(primask);
@@ -3059,7 +3062,7 @@ bool circular_buffer_get(CircularBuffer_t *cb, uint8_t *data) {
     }
     
     *data = cb->buffer[cb->tail];
-    cb->tail = (cb->tail + 1) % sizeof(cb->buffer);
+    cb->tail = (cb->tail + 1) % UART_RX_BUFFER_SIZE;
     cb->count--;
     
     __set_PRIMASK(primask);
@@ -3482,7 +3485,9 @@ void TIM6_DAC_IRQHandler(void) {
         
         if (confirmed_state == btn_state) {
             // State stable, process event
-            uint32_t current_time = HAL_GetTick();  // Or use SysTick
+            // Note: Using SysTick or dedicated timer counter for timing
+            // HAL_GetTick() may not be safe in all interrupt contexts
+            uint32_t current_time = SysTick->VAL;  // Or use dedicated counter
             
             if (btn_state) {
                 // Button pressed
