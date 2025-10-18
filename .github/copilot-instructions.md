@@ -23,8 +23,8 @@ Purpose: Help you explain the why and how, link topics across documents, and giv
 - AN: Application Note (e.g., `AN/an2834-...pdf`) → practical setup/accuracy/peripheral recipes.
 - TN: Technical Note (`TN/*.pdf`) → packaging/thermal/production nuances.
 
-## Answer pattern (keep it tight but deep)
-Genernal approach: 1) Big picture and goal → 2) Mechanism/dataflow → 3) Config checklist (registers/bits) → 4) Pitfalls & best practices → 5) Doc cites (file + pages + topic/section).
+## Answer pattern (keep it tight but deep + rich docs cites)
+Genernal approach: 1) Big picture and goal → 2) Mechanism/dataflow → 3) Config checklist (registers/bits) → 4) Pitfalls & best practices → 5) Rich Doc cites (file + pages + topic/section).
 
 - Scope & goal: State what the system must do (functional) and the non‑functional targets (rate, latency, resolution, ranges, power).
 - Architecture map: Draw the dataflow and dependencies (core ↔ AHB/APB, TIM TRGO → ADC EXTSEL, ADC → DMA → buffer, buffer → control → TIMx_CCRy).
@@ -138,10 +138,114 @@ Exit criteria: data moves at expected rates without CPU polling; no overrun/unde
   - AN4013/AN4776: “master/slave mode”, “trigger output”, “PWM mode 1/2”.
   - AN4031: “FIFO threshold”, “burst”, “double buffer (DBM)”.
 
-## Worked examples (optional, short)
-- Timer‑triggered ADC with circular DMA → control loop → PWM:
-  1) TIMx: set PSC/ARR and TRGO; 2) ADC: EXTSEL=TIMx_TRGO, sample times, sequence; 3) DMA: circ, 16‑bit width to buffer[2N], HT/TC ISR; 4) In HT/TC, run control on half; 5) Update TIMx_CCRy for PWM. Docs: RM0090 (TIM/ADC/DMA), AN4013, AN2834, AN4031.
-- Complementary PWM with break‑deadtime (TIM1/TIM8):
-  Set PSC/ARR; CCMR1 OCxM=PWM mode; CCER enable CHx and CHxN; BDTR: DTG, OSSR/OSSI, MOE; map BKIN to fault input. Verify dead‑time on scope. Docs: RM0090 TIM advanced.
-- USART system bootloader update:
-  Boot to system memory (AN2606), speak AN3155 (init, GET, ERASE, WRITE, VERIFY), handle timeouts/echo; check ES0182 for caveats. Useful for field updates.
+## Worked examples (rich, evidence‑driven for key points)
+
+### General guidelines for examples
+- Start with goal + timing/throughput target; list I/O, buffers, ownership.
+- Show configuration with exact registers/bits and initial values.
+- Prove mode/state by reading back registers/flags and interpreting them.
+- Verify timing with math + observable counters/flags; instrument with scope/MCO/DWT.
+- Document ISR/NVIC behavior (preemption, nesting) with ICSR/RETTOBASE evidence.
+- Compare alternatives: what if you don’t use this feature? Note limitations/trade‑offs.
+- Cite docs with file + pp. range + topic (see citation quick guide above).
+
+### Example 1: Timer‑triggered ADC with circular DMA → control loop → PWM
+- Configure
+  - RCC: enable GPIOx/TIMx/ADCx/DMAx in RCC_AHB1ENR/APB2ENR; set PLL per clock math (USB=48 MHz).
+  - TIMx: PSC/ARR for Fs, CR2.MMS=010 (TRGO on update) or per AN4013; optionally one‑pulse.
+  - ADC: SMPRx per source impedance; SQR for sequence; CR2.DMA=1, DDS=1, CONT=0; EXTSEL=TIMx_TRGO, EXTEN=01 (rising).
+  - DMA: SxCR.DIR=peripheral→memory, CIRC=1, MSIZE/PSIZE=16‑bit, MINC=1; NDTR=2N; PAR=&ADCx->DR; M0AR/M1AR to buffers.
+- Evidence
+  - Read TIMx_CR2.MMS, ADC_CR2.EXTSEL/EXTEN, DMA_SxCR.CIRC/MSIZE/PSIZE, RCC enable bits.
+  - Observe DMA_LISR/HISR: HTIFx/TCIFx cadence; ADCx_SR: OVR must stay 0; TIMx_SR.UIF rate matches Fs.
+  - Instrument: toggle GPIO in HT/TC ISR; or route TRGO cadence via another timer; measure with scope.
+- Control loop
+  - Run control on half‑buffer boundaries to meet latency/jitter constraints; update TIMy_CCRz for PWM.
+- Alternatives & limits
+  - Polling EOC: higher CPU load, jitter; may miss deadlines at high Fs.
+  - ADC software trigger: non‑deterministic w.r.t. PWM; timer trigger removes phase drift.
+- Docs: RM0090, pp. XX–YY (TIM CR2.MMS/TRGO; ADC EXTSEL/CR2.DMA; DMA SxCR/NDTR); AN4013 (triggers); AN2834/AN4073 (accuracy); AN4031 (DMA).
+
+### Example 2: Complementary PWM with break‑deadtime (TIM1/TIM8)
+- Configure
+  - TIM1: PSC/ARR; CCMR1/2 OCxM=PWM1/2, OCxPE=1; CCER enable CHx + CHxN with proper polarity.
+  - BDTR: DTG set per dead‑time; OSSR/OSSI as needed; BKP/BKF if used; MOE=1.
+  - GPIO: map CHx (AF1) and CHxN to appropriate pins with speed=high, no pull.
+- Evidence
+  - Read TIM1_BDTR (MOE=1, DTG≠0), TIM1_CCER enable bits, TIM1_CCMR OCxM.
+  - Scope: verify complementary outputs and measured dead‑time equals DTG programming.
+  - Break test: pull BKIN active → TIM1_BDTR.BKE=1 should force outputs safe; read TIM1_SR for break flags.
+- Alternatives & limits
+  - Using general‑purpose timers + GPIO toggling cannot generate true complementary outputs with dead‑time; risk of shoot‑through.
+- Docs: RM0090, pp. XX–YY (TIM advanced‑control/BDTR/MOE/DTG; CCER/CCMR); AN4776 (cookbook).
+
+### Example 3: Nested interrupts and deterministic priorities
+- Configure
+  - PM0214: set priority grouping; assign preemption priorities so ISR_A preempts ISR_B.
+  - NVIC: enable both IRQs; optional tail‑chaining demo.
+- Evidence
+  - Read SCB->ICSR.VECTACTIVE and RETTOBASE during ISRs to prove nesting; log timestamps with DWT->CYCCNT.
+  - Check NVIC->IPR values match intended preemption/subpriority; confirm group in SCB->AIRCR.PRIGROUP.
+  - Show stacked LR/PC in the preempted ISR prologue.
+- Alternatives & limits
+  - Single priority level → no preemption → increased latency for critical control loops.
+  - Excessive nesting → stack pressure; measure maximum depth vs. stack size.
+- Docs: PM0214, pp. XX–YY (NVIC priority grouping, ICSR, RETTOBASE, tail‑chaining); ARM TRM (lazy stacking/FPU context).
+
+### Example 4: DMA double‑buffer (DBM) vs circular single‑buffer
+- Configure
+  - Enable DBM in DMA_SxCR; set M0AR and M1AR; use HT/TC to alternate halves; watch SxCR.CT toggle.
+- Evidence
+  - Read DMA_SxCR.DBM=1; observe SxCR.CT toggling; NDTR reload at boundaries; no TE/FE/ DME errors in LISR/HISR.
+- Alternatives & limits
+  - Single circular buffer: simpler but higher risk of producer/consumer contention; requires careful HT/TC handling.
+  - FIFO off vs on (FCR): affects burst efficiency; misconfig can throttle throughput.
+- Docs: RM0090/AN4031, pp. XX–YY (DBM, FIFO, HT/TC semantics).
+
+### Example 5: Encoder interface using timer in encoder mode
+- Configure
+  - TIMx_SMCR.SMS=001/010 (encoder mode), TI1/TI2 mapped as inputs; CCMR configured as inputs; IC filters per noise.
+- Evidence
+  - Move shaft: TIMx_CNT increments/decrements; read TIMx_SR for over/underflow; verify direction via TIMx_CR1.DIR.
+- Alternatives & limits
+  - Polling EXTI edges: higher CPU load, worse jitter; lost edges at speed; no built‑in direction decode.
+- Docs: RM0090, pp. XX–YY (TIM encoder mode, SMCR/CCMR/CCER).
+
+### Example 6: Low‑noise ADC sampling (layout + timing)
+- Configure
+  - Increase sampling time (SMPRx) for high source impedance; average/oversample in software; trigger via TIM to avoid jitter.
+  - Power: stabilize VDDA/Vref; reduce digital noise (gate clocks not used).
+- Evidence
+  - Measure code dispersion (stddev) before/after changes; confirm ADC clock ≤ 36 MHz; verify trigger determinism.
+- Alternatives & limits
+  - Short sampling with high‑Z source → gain error/noise; software averaging adds latency.
+- Docs: AN2834/AN4073, pp. XX–YY (accuracy, impedance, oversampling); DS8626 limits.
+
+### Example 7: Clock math and validation (SYSCLK/USB/APB)
+- Configure
+  - Set PLLM/N/P/Q to achieve SYSCLK target and USB=48 MHz; configure Flash latency per SYSCLK.
+- Evidence
+  - Read RCC->CFGR.SWS=PLL; RCC->PLLCFGR values; verify APB1≤42 MHz, APB2≤84 MHz.
+  - Output MCO on a pin (RCC->CFGR.MCOx) and measure frequency with scope.
+- Alternatives & limits
+  - Wrong Flash wait‑states → hard faults/data corruption; wrong USB clock → USB enumeration fails.
+- Docs: DS8626/RM0090, pp. XX–YY (clock tree, PLL, Flash latency); AN3988 (tooling).
+
+### Example 8: Fault triage with stacked registers (HardFault/BusFault)
+- Configure
+  - Install HardFault/BusFault handlers that capture stacked r0‑r3, r12, lr, pc, xPSR; read CFSR/HFSR/BFAR/MMFAR.
+- Evidence
+  - Report PC/LR to locate faulting instruction; decode CFSR to identify precise cause (e.g., PRECISERR, UNALIGNED);
+  - If lazily stacked FPU: consult PM0214 notes.
+- Alternatives & limits
+  - Without structured dump, fault root cause opaque; random resets during development.
+- Docs: PM0214/ARM TRM, pp. XX–YY (fault model, stacked frame).
+
+### Example 9: System bootloader over USART (field update)
+- Configure
+  - Enter system memory per AN2606 (BOOT0 pin/OB settings); use AN3155 command set (INIT/GET/ERASE/WRITE/VERIFY).
+- Evidence
+  - Observe bootloader responses (ACK/bytes) per AN3155; confirm flash contents after programming.
+- Alternatives & limits
+  - Custom app‑level protocol requires your own ROM/DFU; more maintenance; check ES0182 limitations.
+- Docs: AN2606/AN3155/AN3156/ES0182, pp. XX–YY.
