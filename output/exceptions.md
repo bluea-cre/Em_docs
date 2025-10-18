@@ -943,6 +943,7 @@ typedef struct {
 } TCB_t;
 
 #define MAX_TASKS 8
+#define TCB_SIZE_BYTES 12  // 3 uint32_t fields = 12 bytes
 TCB_t tasks[MAX_TASKS];
 uint8_t current_task = 0;
 uint8_t next_task = 0;
@@ -977,7 +978,8 @@ void PendSV_Handler(void) {
         "LDR     R1, =current_task      \n"  // R1 = &current_task
         "LDR     R1, [R1]               \n"  // R1 = current_task (index)
         "LDR     R2, =tasks             \n"  // R2 = &tasks[0]
-        "LSL     R3, R1, #4             \n"  // R3 = current_task * 16 (TCB size)
+        "MOV     R3, #12                \n"  // R3 = sizeof(TCB_t) = 12 bytes
+        "MUL     R3, R1, R3             \n"  // R3 = current_task * 12
         "ADD     R2, R2, R3             \n"  // R2 = &tasks[current_task]
         "STR     R0, [R2]               \n"  // tasks[current_task].stack_ptr = PSP
         
@@ -991,7 +993,8 @@ void PendSV_Handler(void) {
         
         // Load PSP from next task's TCB
         "LDR     R2, =tasks             \n"
-        "LSL     R3, R0, #4             \n"  // R3 = next_task * 16
+        "MOV     R3, #12                \n"  // R3 = sizeof(TCB_t) = 12 bytes
+        "MUL     R3, R0, R3             \n"  // R3 = next_task * 12
         "ADD     R2, R2, R3             \n"  // R2 = &tasks[next_task]
         "LDR     R0, [R2]               \n"  // R0 = tasks[next_task].stack_ptr
         
@@ -3087,8 +3090,10 @@ void uart1_init(void) {
     // STEP 3: Configure USART1
     // USART1 clock = APB2 = 84 MHz
     // Baud rate = 115200
-    // BRR = 84000000 / 115200 = 729.166 = 0x2D9
-    USART1->BRR = 0x2D9;
+    // BRR = (84000000 / 115200) = 729.17
+    // Mantissa = 729 (0x2D9), Fraction = 0.17 * 16 = 2.72 ≈ 3
+    // BRR = (729 << 4) | 3 = 0x2D93
+    USART1->BRR = 0x2D93;
     
     // Enable TX, RX, and interrupts
     USART1->CR1 = USART_CR1_TE |        // Transmitter enable
@@ -3415,7 +3420,9 @@ void button_init(void) {
     
     // STEP 5: Configure TIM6 for debounce timing
     RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
-    TIM6->PSC = 42000 - 1;  // 42 MHz / 42000 = 1 kHz (1ms tick)
+    // TIM6 clock: APB1 timer clock = 84 MHz (2x APB1 when APB1 prescaler > 1)
+    // For 1 kHz (1ms tick): prescaler = 84000 - 1
+    TIM6->PSC = 84000 - 1;  // 84 MHz / 84000 = 1 kHz (1ms tick)
     TIM6->ARR = DEBOUNCE_DELAY_MS - 1;
     TIM6->DIER = TIM_DIER_UIE;  // Update interrupt enable
     
